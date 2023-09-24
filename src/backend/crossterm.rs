@@ -3,6 +3,7 @@
 //!
 //! [Crossterm]: https://crates.io/crates/crossterm
 use std::io::{self, Write};
+use std::rc::Rc;
 
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
@@ -21,6 +22,12 @@ use crate::{
     prelude::Rect,
     style::{Color, Modifier},
 };
+
+use core::marker::PhantomData;
+#[cfg(target_arch = "wasm32")]
+use xterm_js_rs::crossterm::XtermJsCrosstermBackend;
+#[cfg(target_arch = "wasm32")]
+use xterm_js_rs::xterm::Terminal;
 
 /// A [`Backend`] implementation that uses [Crossterm] to render to the terminal.
 ///
@@ -75,10 +82,17 @@ use crate::{
 /// [`backend`]: crate::backend
 /// [Crossterm]: https://crates.io/crates/crossterm
 /// [examples]: https://github.com/ratatui-org/ratatui/tree/main/examples#examples
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Default, Clone, Eq, PartialEq, Hash)]
 pub struct CrosstermBackend<W: Write> {
     /// The writer used to send commands to the terminal.
     writer: W,
+}
+
+#[cfg(target_arch = "wasm32")]
+pub struct CrosstermBackend<W: Write = Vec<u8>> {
+    pub writer: XtermJsCrosstermBackend,
+    _w: PhantomData<W>,
 }
 
 impl<W> CrosstermBackend<W>
@@ -94,8 +108,17 @@ where
     /// # use ratatui::prelude::*;
     /// let backend = CrosstermBackend::new(stdout());
     /// ```
-    pub fn new(writer: W) -> CrosstermBackend<W> {
-        CrosstermBackend { writer }
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn new(writer: W) -> Self {
+        Self { writer }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn new(terminal: Rc<Terminal>) -> CrosstermBackend<W> {
+        Self {
+            writer: terminal.into(),
+            _w: PhantomData,
+        }
     }
 }
 
@@ -178,8 +201,15 @@ where
     }
 
     fn get_cursor(&mut self) -> io::Result<(u16, u16)> {
-        crossterm::cursor::position()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+        #[cfg(not(target_arch = "wasm32"))]
+        let res = crossterm::cursor::position()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()));
+
+        #[cfg(target_arch = "wasm32")]
+        let res = crossterm::cursor::position(&*self.writer.terminal)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()));
+
+        res
     }
 
     fn set_cursor(&mut self, x: u16, y: u16) -> io::Result<()> {
@@ -210,11 +240,19 @@ where
         self.writer.flush()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn size(&self) -> io::Result<Rect> {
         let (width, height) = terminal::size()?;
         Ok(Rect::new(0, 0, width, height))
     }
 
+    #[cfg(target_arch = "wasm32")]
+    fn size(&self) -> io::Result<Rect> {
+        let (width, height) = terminal::size(&self.writer.terminal)?;
+        Ok(Rect::new(0, 0, width, height))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn window_size(&mut self) -> Result<WindowSize, io::Error> {
         let crossterm::terminal::WindowSize {
             columns,
@@ -222,6 +260,23 @@ where
             width,
             height,
         } = terminal::window_size()?;
+        Ok(WindowSize {
+            columns_rows: Size {
+                width: columns,
+                height: rows,
+            },
+            pixels: Size { width, height },
+        })
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn window_size(&mut self) -> Result<WindowSize, io::Error> {
+        let crossterm::terminal::WindowSize {
+            columns,
+            rows,
+            width,
+            height,
+        } = terminal::window_size(&self.writer.terminal)?;
         Ok(WindowSize {
             columns_rows: Size {
                 width: columns,
